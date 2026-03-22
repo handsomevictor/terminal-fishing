@@ -1,10 +1,14 @@
 import curses
 import random
+import json
+import os
 from fishing_game import config
 from fishing_game.utils import draw_str
 from fishing_game.entities.water import Water
 from fishing_game.entities.fish import Fish
 from fishing_game.entities.rod import Rod
+
+SAVE_FILE = "save.json"
 
 class Game:
     def __init__(self, stdscr):
@@ -20,19 +24,39 @@ class Game:
         
         self.state = "MENU"
         self.score = 0
+        self.high_score = self.load_high_score()
+        self.combo = 0
         self.bite_timer = 0
         self.reel_timer = 0
         self.target_fish = None
         self.message = "Press SPACE to start"
         self.message_timer = 0
 
+    def load_high_score(self):
+        if os.path.exists(SAVE_FILE):
+            try:
+                with open(SAVE_FILE, "r") as f:
+                    data = json.load(f)
+                    return data.get("high_score", 0)
+            except:
+                return 0
+        return 0
+
+    def save_high_score(self):
+        if self.score > self.high_score:
+            with open(SAVE_FILE, "w") as f:
+                json.dump({"high_score": self.score}, f)
+
     def spawn_fish(self):
-        if len(self.fishes) < config.MAX_FISH and random.random() < config.FISH_SPAWN_CHANCE:
+        spawn_chance = config.FISH_SPAWN_CHANCE + (self.score * 0.0001) # Dynamic difficulty
+        if len(self.fishes) < config.MAX_FISH and random.random() < spawn_chance:
             self.fishes.append(Fish(self.water_start_y, self.max_y, self.max_x))
 
     def update(self):
+        if self.max_y < 15 or self.max_x < 40:
+            return # Pause update if screen too small
+
         self.water.update()
-        
         self.spawn_fish()
         for fish in self.fishes:
             fish.move()
@@ -51,7 +75,8 @@ class Game:
                     if dist_x <= config.BITE_DISTANCE_X and dist_y <= config.BITE_DISTANCE_Y:
                         if random.random() < config.BITE_CHANCE:
                             self.state = "BITING"
-                            self.bite_timer = config.BITE_MAX_WAIT
+                            # Shorter bite window at higher scores
+                            self.bite_timer = max(10, config.BITE_MAX_WAIT - (self.score // 50))
                             self.target_fish = fish
                             fish.bitten = True
                             break
@@ -61,6 +86,7 @@ class Game:
             if self.bite_timer <= 0:
                 self.state = "IDLE"
                 self.rod.reset()
+                self.combo = 0
                 self.set_message("Fish got away...", 60)
                 if self.target_fish in self.fishes:
                     self.fishes.remove(self.target_fish)
@@ -71,6 +97,7 @@ class Game:
             if self.reel_timer <= 0:
                 self.state = "IDLE"
                 self.rod.reset()
+                self.combo = 0
                 self.set_message("Too slow! It got away.", 60)
                 if self.target_fish in self.fishes:
                     self.fishes.remove(self.target_fish)
@@ -82,10 +109,11 @@ class Game:
     def handle_input(self, key):
         if key == curses.KEY_RESIZE:
             self.max_y, self.max_x = self.stdscr.getmaxyx()
-            self.water_start_y = int(self.max_y * config.WATER_LEVEL_RATIO)
-            self.water_height = self.max_y - self.water_start_y
-            self.water.resize(self.water_start_y, self.water_height, self.max_x)
-            self.rod.player_y = self.water_start_y - 3
+            if self.max_y >= 15 and self.max_x >= 40:
+                self.water_start_y = int(self.max_y * config.WATER_LEVEL_RATIO)
+                self.water_height = self.max_y - self.water_start_y
+                self.water.resize(self.water_start_y, self.water_height, self.max_x)
+                self.rod.player_y = self.water_start_y - 3
             
         elif self.state == "MENU":
             if key == ord(' '):
@@ -107,8 +135,16 @@ class Game:
                 
         elif self.state == "REELING":
             if key in [ord('\n'), curses.KEY_ENTER, 10, 13]:
-                self.score += self.target_fish.points
-                self.set_message(f"Caught a {self.target_fish.rarity} fish! +{self.target_fish.points} pts", 100)
+                multiplier = 1 + (self.combo * 0.1)
+                earned = int(self.target_fish.points * multiplier)
+                self.score += earned
+                if earned > 0:
+                    self.combo += 1
+                    self.set_message(f"Caught {self.target_fish.rarity}! +{earned} (Combo x{self.combo})", 100)
+                else:
+                    self.combo = 0
+                    self.set_message(f"Eww, a {self.target_fish.rarity}. {earned} pts", 100)
+                
                 if self.target_fish in self.fishes:
                     self.fishes.remove(self.target_fish)
                 self.target_fish = None
@@ -122,7 +158,12 @@ class Game:
     def draw(self):
         self.stdscr.erase()
         
-        draw_str(self.stdscr, 0, 0, f"Score: {self.score}", config.COLOR_UI)
+        if self.max_y < 15 or self.max_x < 40:
+            draw_str(self.stdscr, 0, 0, "Terminal too small! Please resize.", config.COLOR_ALERT)
+            self.stdscr.refresh()
+            return
+
+        draw_str(self.stdscr, 0, 0, f"Score: {self.score} | High Score: {self.high_score} | Combo: {self.combo}", config.COLOR_UI)
         draw_str(self.stdscr, 0, self.max_x - 18, "Press 'q' to quit", config.COLOR_UI)
         
         draw_str(self.stdscr, self.water_start_y - 1, 0, "=" * self.max_x, config.COLOR_UI)
@@ -145,5 +186,9 @@ class Game:
             progress = int((self.reel_timer / config.REEL_TIME_LIMIT) * bar_len)
             bar = "[" + "#" * progress + " " * (bar_len - progress) + "]"
             draw_str(self.stdscr, self.max_y // 2, self.max_x // 2 - 11, bar, config.COLOR_ALERT)
+
+        # Bite Flash effect
+        if self.state == "BITING" and self.bite_timer % 4 < 2:
+            draw_str(self.stdscr, 0, self.max_x // 2 - 4, " BITE! ", config.COLOR_ALERT | curses.A_REVERSE)
 
         self.stdscr.refresh()
