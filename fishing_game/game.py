@@ -31,6 +31,11 @@ class Game:
         self.target_fish = None
         self.message = "Press SPACE to start"
         self.message_timer = 0
+        
+        # Casting mechanics
+        self.charging = False
+        self.charge_power = 0.0  # 0.0 to 1.0
+        self.charge_direction = 1  # 1 for increasing, -1 for decreasing
 
     def load_high_score(self):
         if os.path.exists(SAVE_FILE):
@@ -58,8 +63,21 @@ class Game:
 
         self.water.update()
         self.spawn_fish()
+        
+        # Handle charging logic (Ping-pong power meter)
+        if self.state == "IDLE" and self.charging:
+            self.charge_power += 0.05 * self.charge_direction
+            if self.charge_power >= 1.0:
+                self.charge_power = 1.0
+                self.charge_direction = -1
+            elif self.charge_power <= 0.1:
+                self.charge_power = 0.1
+                self.charge_direction = 1
+
         for fish in self.fishes:
-            fish.move()
+            # Pass hook coordinates to fish for AI reactions
+            hook_pos = (self.rod.hook_x, self.rod.hook_y) if self.state in ["WAITING", "BITING"] else None
+            fish.move(hook_pos)
             
         self.fishes = [f for f in self.fishes if not f.is_out_of_bounds()]
         
@@ -87,7 +105,7 @@ class Game:
                 self.state = "IDLE"
                 self.rod.reset()
                 self.combo = 0
-                self.set_message("Fish got away...", 60)
+                self.set_message("Fish got away... You missed the bite.", 60)
                 if self.target_fish in self.fishes:
                     self.fishes.remove(self.target_fish)
                 self.target_fish = None
@@ -118,20 +136,87 @@ class Game:
         elif self.state == "MENU":
             if key == ord(' '):
                 self.state = "IDLE"
-                self.set_message("Press SPACE to cast", 60)
+                self.set_message("Hold SPACE to charge, release to cast!", 100)
                 
         elif self.state == "IDLE":
             if key == ord(' '):
+                # Start charging
+                if not self.charging:
+                    self.charging = True
+                    self.charge_power = 0.1
+                    self.charge_direction = 1
+            elif self.charging and key == -1:
+                # Key released (non-blocking input returns -1 when nothing is pressed)
+                # We need a way to detect release. Since curses doesn't have explicit KeyUp events easily,
+                # we'll simulate it: if we were charging and now we see NO key (or specifically not space),
+                # we cast!
+                self.charging = False
                 self.state = "CASTING"
-                target_x = random.randint(20, max(21, self.max_x - 10))
+                
+                # Calculate target based on power
+                min_distance = 15
+                max_distance = self.max_x - self.rod.player_x - 10
+                distance = int(min_distance + (max_distance - min_distance) * self.charge_power)
+                target_x = self.rod.player_x + distance
                 target_y = random.randint(self.water_start_y + 1, self.max_y - 2)
+                
                 self.rod.cast(target_x, target_y)
                 
+        elif self.state == "WAITING":
+            if key in [ord('\n'), curses.KEY_ENTER, 10, 13]:
+                # Active reeling: check if any fish is near the hook
+                caught = False
+                for fish in self.fishes:
+                    dist_x = abs(fish.x - self.rod.hook_x)
+                    dist_y = abs(fish.y - self.rod.hook_y)
+                    # Slightly larger catch radius than bite radius
+                    if dist_x <= config.BITE_DISTANCE_X + 2 and dist_y <= config.BITE_DISTANCE_Y + 1:
+                        # Success chance based on distance
+                        chance = 1.0 - (dist_x + dist_y * 2) * 0.1
+                        if random.random() < chance:
+                            self.target_fish = fish
+                            caught = True
+                            break
+                
+                if caught:
+                    multiplier = 1 + (self.combo * 0.1)
+                    earned = int(self.target_fish.points * multiplier)
+                    self.score += earned
+                    if earned > 0:
+                        self.combo += 1
+                        self.set_message(f"Active Catch: {self.target_fish.rarity}! +{earned} (Combo x{self.combo})", 100)
+                    else:
+                        self.combo = 0
+                        self.set_message(f"Eww, snagged a {self.target_fish.rarity}. {earned} pts", 100)
+                    
+                    if self.target_fish in self.fishes:
+                        self.fishes.remove(self.target_fish)
+                else:
+                    self.combo = 0
+                    self.set_message("Pulled up nothing but water...", 60)
+                
+                self.target_fish = None
+                self.state = "IDLE"
+                self.rod.reset()
+                
         elif self.state == "BITING":
-            if key == ord(' '):
-                self.state = "REELING"
-                self.reel_timer = config.REEL_TIME_LIMIT
-                self.set_message("REEL! Press ENTER!", 60)
+            if key in [ord('\n'), curses.KEY_ENTER, 10, 13]:
+                # If they press enter exactly during the bite flash, they auto-catch it!
+                multiplier = 1 + (self.combo * 0.1)
+                earned = int(self.target_fish.points * multiplier)
+                self.score += earned
+                if earned > 0:
+                    self.combo += 1
+                    self.set_message(f"Perfect Catch: {self.target_fish.rarity}! +{earned} (Combo x{self.combo})", 100)
+                else:
+                    self.combo = 0
+                    self.set_message(f"Eww, snagged a {self.target_fish.rarity}. {earned} pts", 100)
+                
+                if self.target_fish in self.fishes:
+                    self.fishes.remove(self.target_fish)
+                self.target_fish = None
+                self.state = "IDLE"
+                self.rod.reset()
                 
         elif self.state == "REELING":
             if key in [ord('\n'), curses.KEY_ENTER, 10, 13]:
@@ -181,6 +266,13 @@ class Game:
         elif self.message_timer > 0:
             draw_str(self.stdscr, 2, max(0, self.max_x // 2 - len(self.message) // 2), self.message, config.COLOR_ALERT)
             
+        if self.state == "IDLE" and self.charging:
+            bar_len = 20
+            progress = int(self.charge_power * bar_len)
+            bar = "[" + "=" * progress + " " * (bar_len - progress) + "]"
+            color = config.COLOR_ALERT if self.charge_power > 0.8 else config.COLOR_UI
+            draw_str(self.stdscr, self.max_y // 2, self.max_x // 2 - 11, "POWER: " + bar, color)
+            
         if self.state == "REELING":
             bar_len = 20
             progress = int((self.reel_timer / config.REEL_TIME_LIMIT) * bar_len)
@@ -189,6 +281,6 @@ class Game:
 
         # Bite Flash effect
         if self.state == "BITING" and self.bite_timer % 4 < 2:
-            draw_str(self.stdscr, 0, self.max_x // 2 - 4, " BITE! ", config.COLOR_ALERT | curses.A_REVERSE)
+            draw_str(self.stdscr, 0, self.max_x // 2 - 4, " BITE! ", config.COLOR_ALERT, curses.A_REVERSE)
 
         self.stdscr.refresh()

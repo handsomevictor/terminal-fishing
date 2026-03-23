@@ -18,8 +18,7 @@ def main(stdscr, test_mode=False):
             game.save_high_score()
             break
             
-        if key != -1:
-            game.handle_input(key)
+        game.handle_input(key)
             
         game.update()
         game.draw()

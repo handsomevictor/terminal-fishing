@@ -42,13 +42,21 @@ class Rod:
         
         # Draw line and hook
         if self.hook_x is not None and self.hook_y is not None:
-            # Draw line (simplified to just a bobber/hook for now)
+            # Draw fishing line (from player rod tip down to hook)
+            rod_tip_x = self.player_x + 5
+            rod_tip_y = self.player_y - 1
+            
+            if state in ["WAITING", "BITING"]:
+                # Draw vertical line from rod tip level down to hook
+                for ly in range(rod_tip_y, self.hook_y):
+                    draw_str(stdscr, ly, self.hook_x, "|", config.COLOR_HOOK)
+
             if state == "CASTING":
-                draw_str(stdscr, self.hook_y, self.hook_x, "J", config.COLOR_HOOK)
+                draw_str(stdscr, self.hook_y, self.hook_x, " J ", config.COLOR_HOOK)
             elif state in ["WAITING", "BITING", "REELING"]:
-                # Draw bobber
-                symbol = "o"
+                # Draw larger bobber
+                symbol = "(O)"
                 if state == "BITING":
-                    symbol = "O" if bite_timer % 2 == 0 else "o"
-                    draw_str(stdscr, self.hook_y - 1, self.hook_x, "!", config.COLOR_ALERT)
-                draw_str(stdscr, self.hook_y, self.hook_x, symbol, config.COLOR_HOOK)
+                    symbol = "[!]" if bite_timer % 2 == 0 else "(O)"
+                    draw_str(stdscr, self.hook_y - 1, self.hook_x, " !! ", config.COLOR_ALERT)
+                draw_str(stdscr, self.hook_y, self.hook_x - 1, symbol, config.COLOR_HOOK)
